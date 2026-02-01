@@ -1,4 +1,12 @@
 
+// リリース用：すべてのコンソール出力を無効化
+if (true) { // 公開時は true、開発時は false にする
+    console.log = function() {};
+    console.warn = function() {};
+    console.error = function() {}; // 重大なエラーも隠したい場合
+}
+
+
 // 補助：テーブル待機関数
 async function waitForTable() {
   return new Promise((resolve) => {
@@ -37,12 +45,22 @@ function fetchWikiInfo(productID){
     // DMMの品番は小文字、Wikiは大文字の場合があるため両方小文字にして比較
     const targetDt = dts.find(dt => dt.innerText.includes("AV女優名"));
 
-    if (targetDt) {
+    if (targetDt && targetDt.nextElementSibling) {
         // 3. その隣にある <dd> （女優名が入っている場所）を取得
         const actressCell = targetDt.nextElementSibling;
+
+        const anchorTags = Array.from(actressCell.querySelectorAll('a'));
+            
+            let actressName = "";
+            if (anchorTags.length > 0) {
+                // aタグがある場合は、それぞれのテキストを半角スペースでつなぐ
+                actressName = anchorTags.map(a => a.innerText.trim()).join(" ");
+            } else {
+                // aタグがない場合（直書きの場合）のフォールバック
+                actressName = actressCell.innerText.trim();
+            }
         
         if (actressCell) {
-            const actressName = actressCell.innerText.trim();
             console.log("🎯 女優名を発見:", actressName);
 
             // 4. DMMのページに書き込む
@@ -57,52 +75,63 @@ function fetchWikiInfo(productID){
 }
 
 // DMMの出演者欄に書き込む関数
-function fillActressToDMM(name) {
-    const allCells = Array.from(document.querySelectorAll('td'));
-    const castRow = allCells.find(td => td.innerText.includes("出演者："));
-    
-    // 検索URLの生成（日本語をURL用にエンコード）
-    const searchUrl = `https://video.dmm.co.jp/list/?key=${encodeURIComponent(name)}`;
-    // リンクタグの組み立て
-    const linkHtml = `<a href="${searchUrl}" style="color: #0073e6; text-decoration: underline;">${name}</a>`;
-
-    let targetCell;
-
-    if (castRow && castRow.nextElementSibling) {
-        // すでに出演者行がある場合
-        targetCell = castRow.nextElementSibling;
-        console.log("既存の出演者枠を更新します。");
-    } else {
-        // 出演者行がない場合は新しく作成する
-        console.log("出演者枠がないため、新規作成します。");
-        
-        const tbody = document.querySelector("table tbody");
-        if (!tbody) return;
-
-        const newRow = document.createElement("tr");
-        
-        // 見出しセル (左側)
-        const newHeader = document.createElement("td");
-        newHeader.innerText = "出演者：";
-        newHeader.setAttribute("align", "right");
-        newHeader.setAttribute("valign", "top");
-        newHeader.setAttribute("class", "nw"); // DMMの標準スタイル
-        
-        // 内容セル (右側)
-        targetCell = document.createElement("td");
-        
-        newRow.appendChild(newHeader);
-        newRow.appendChild(targetCell);
-        tbody.appendChild(newRow); // テーブルの最後に追加
+function fillActressToDMM(names) {
+  // 1. スタイルの定義（一度だけ追加）
+    if (!document.getElementById("my-actress-style")) {
+        const style = document.createElement("style");
+        style.id = "my-actress-style";
+        style.innerHTML = `
+            .my-actress-link {
+                color: #0073e6 !important;
+                text-decoration: none !important;
+                margin-right: 12px !important;
+                display: inline-block;
+            }
+            .my-actress-link:hover {
+                color: #ff0000 !important;
+                text-decoration: underline !important;
+            }
+        `;
+        document.head.appendChild(style);
     }
 
-    // 女優名をリンクとして流し込み、装飾を適用
+    // 1. 女優名が複数いる場合（Wikiがカンマやスペース区切りと想定）を分割してリンク化
+    // 半角スペース、全角スペース、カンマ（全角・半角）、読点をすべて対象に分割
+    const nameArray = names.split(/[\s,、　 ]+/).filter(n => n.length > 0);
+    
+    const linkHtml = nameArray.map(name => {
+        const searchUrl = `https://video.dmm.co.jp/list/?key=${encodeURIComponent(name)}`;
+        // ここでもリンク先をアフィリエイト化しておく
+        const affSearchUrl = `https://al.fanza.co.jp/?lurl=${encodeURIComponent(searchUrl)}&af_id=6dy-990&ch=api`;
+        return `<a href="${affSearchUrl}" class="my-actress-link">${name}</a>`;
+    }).join(""); // スペースの代わりに margin-right で間隔を確保
+
+    // 2. 出演者：枠の特定（重複防止のため厳密にチェック）
+    const allCells = Array.from(document.querySelectorAll('td, th'));
+    const castLabel = allCells.find(el => el.innerText.trim().replace("：", "") === "出演者");
+    
+    let targetCell;
+    if (castLabel) {
+        // すでに枠がある場合、その行の td を探す
+        const row = castLabel.closest('tr');
+        targetCell = row.querySelector('td:last-child');
+        console.log("✅ 既存の出演者枠を更新します。");
+    } else {
+        // 新規作成
+        console.log("➕ 出演者枠を新規作成します。");
+        const tbody = document.querySelector("table tbody");
+        if (!tbody) return;
+        const newRow = document.createElement("tr");
+        newRow.innerHTML = `
+            <td align="right" valign="top" class="nw">出演者：</td>
+            <td style="font-weight: bold; background-color: #fff9c4; padding: 2px 5px;"></td>
+        `;
+        tbody.appendChild(newRow);
+        targetCell = newRow.querySelector('td:last-child');
+    }
+
     if (targetCell) {
-        targetCell.innerHTML = linkHtml; // innerText ではなく innerHTML を使用
-        targetCell.style.fontWeight = "bold";
-        targetCell.style.backgroundColor = "#fff9c4"; // 薄い黄色でハイライト
-        targetCell.style.padding = "2px 5px";
-        // リンク自体の色を指定したため、親の color 指定は不要（aタグ側で制御）
+        targetCell.innerHTML = linkHtml;
     }
 }
 
