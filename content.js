@@ -76,6 +76,17 @@ function fetchWikiInfo(productID){
 
 // DMMの出演者欄に書き込む関数
 function fillActressToDMM(names) {
+  // 名前が空、または「＊＊＊」などの伏せ字、あるいは取得失敗時は何もしない
+    if (!names || names.includes("＊＊＊") || names.trim() === "") {
+        console.log("⚠️ 有効な女優名ではないため、上書きをスキップします。");
+        
+        // もし「取得中...」のぐるぐるを表示していた場合は、それだけ消して元の状態に戻す
+        const loadingText = document.querySelector('.actress-target-cell');
+        if (loadingText && loadingText.innerHTML.includes("取得中")) {
+            loadingText.innerHTML = ""; // または公式の表示を維持する処理
+        }
+        return; 
+    }
   // 1. スタイルの定義（一度だけ追加）
     if (!document.getElementById("my-actress-style")) {
         const style = document.createElement("style");
@@ -90,6 +101,20 @@ function fillActressToDMM(names) {
             .my-actress-link:hover {
                 color: #ff0000 !important;
                 text-decoration: underline !important;
+            }
+            .loading-spinner {
+                width: 14px;
+                height: 14px;
+                border: 2px solid #ccc;
+                border-top-color: #0073e6;
+                border-radius: 50%;
+                display: inline-block;
+                animation: spin 0.8s linear infinite;
+                vertical-align: middle;
+                margin-left: 5px;
+            }
+            @keyframes spin {
+              to { transform: rotate(360deg); }
             }
         `;
         document.head.appendChild(style);
@@ -135,6 +160,43 @@ function fillActressToDMM(names) {
     }
 }
 
+function showLoading() {
+    // 1. 出演者ラベルを探す
+    const allCells = Array.from(document.querySelectorAll('td, th'));
+    const castLabel = allCells.find(el => el.innerText.trim().replace("：", "") === "出演者");
+    
+    let targetCell;
+    if (castLabel) {
+        // すでに枠がある場合、中身を確認する
+        const row = castLabel.closest('tr');
+        targetCell = row.querySelector('td:last-child');
+        
+        // --- ここが重要：既存の文字をチェック ---
+        const currentText = targetCell.innerText.trim();
+        // すでに名前（ハイフン以外かつ＊＊＊以外）が入っているなら、何もしない
+        if (currentText !== "" && currentText !== "----" && !currentText.includes("＊＊＊")) {
+            console.log("✅ すでに名前が登録されているため、上書きしません。");
+            return false; // 取得不要であることを伝える
+        }
+    } else {
+        // 出演者枠自体がない場合は新規作成
+        const tbody = document.querySelector("table tbody");
+        if (!tbody) return false;
+        const newRow = document.createElement("tr");
+        newRow.innerHTML = `
+            <td align="right" valign="top" class="nw">出演者：</td>
+            <td class="actress-target-cell" style="font-weight: bold; background-color: #fff9c4; padding: 2px 5px;"></td>
+        `;
+        tbody.appendChild(newRow);
+        targetCell = newRow.querySelector('.actress-target-cell');
+    }
+
+    if (targetCell) {
+        targetCell.innerHTML = `取得中... <span class="loading-spinner"></span>`;
+        return true; // 取得実行OK
+    }
+    return false;
+}
 
 // メインロジックを関数化
 async function main() {
@@ -157,7 +219,10 @@ if (idHeader) {
 
     if (valueCell) {
       const productID = valueCell.innerText.trim();
-      console.log("🎯 品番の取得に成功:", productID);
+      if (showLoading()) {
+        fetchWikiInfo(productID);
+        console.log("🎯 品番の取得に成功:", productID);
+      }
       
       // ここでWiki取得処理へ（前のコードへ続く）
       fetchWikiInfo(productID); 
@@ -239,10 +304,47 @@ function convertToAffiliateLinks() {
 // ---------------------------------------------------------
 // 実行トリガーの設定
 // ---------------------------------------------------------
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+} else {
+    init();
+}
 
-// A. 初回読み込み時
-main();
-convertToAffiliateLinks();
+function init() {
+    // 初回実行
+    runLogic();
+    // URLと要素の追加を継続監視
+    observeFullPage();
+}
 
-// 監視開始
-observeUrlChange();
+function runLogic() {
+    const url = location.href;
+    // 詳細ページの場合
+    if (url.includes("video.dmm.co.jp")) {
+        main(); // 女優名補完
+    }
+    // リストページの場合
+    if (url.includes("/list/")) {
+        convertToAffiliateLinks(); // アフィリエイト化
+    }
+}
+
+function observeFullPage() {
+    let lastUrl = location.href;
+    
+    const observer = new MutationObserver(() => {
+        // URLが変わったかチェック
+        if (location.href !== lastUrl) {
+            lastUrl = location.href;
+            console.log("🔄 URL変更を検知");
+            runLogic();
+        } 
+        
+        // リストページの場合は、新しい商品が追加されたか常に監視
+        if (location.href.includes("/list/")) {
+            convertToAffiliateLinks(); 
+        }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+}
