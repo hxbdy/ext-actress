@@ -7,6 +7,23 @@ if (true) { // 公開時は true、開発時は false にする
 }
 
 
+// アフィリエイトID
+const MY_AFF_ID = "6dy-990";
+
+// 商品URLをアフィリエイトURLに変換する（変換対象外なら null を返す）
+function toAffiliateUrl(url) {
+    // すでにアフィリエイト化されている、または対象外ならスキップ
+    if (!url || url.includes("al.fanza.co.jp")) return null;
+    if (!url.includes("/av/content/") || !url.includes("id=")) return null;
+
+    // 余計な計測パラメータ（_gl, _ga, _fplc等）を削除
+    const cleaned = url.split('&_gl=')[0]
+                       .split('&_ga=')[0]
+                       .split('&_fplc=')[0];
+
+    return `https://al.fanza.co.jp/?lurl=${encodeURIComponent(cleaned)}&af_id=${MY_AFF_ID}&ch=api`;
+}
+
 // 補助：テーブル待機関数
 async function waitForTable() {
   return new Promise((resolve) => {
@@ -127,7 +144,7 @@ function fillActressToDMM(names) {
     const linkHtml = nameArray.map(name => {
         const searchUrl = `https://video.dmm.co.jp/list/?key=${encodeURIComponent(name)}`;
         // ここでもリンク先をアフィリエイト化しておく
-        const affSearchUrl = `https://al.fanza.co.jp/?lurl=${encodeURIComponent(searchUrl)}&af_id=6dy-990&ch=api`;
+        const affSearchUrl = `https://al.fanza.co.jp/?lurl=${encodeURIComponent(searchUrl)}&af_id=${MY_AFF_ID}&ch=api`;
         return `<a href="${affSearchUrl}" class="my-actress-link">${name}</a>`;
     }).join(""); // スペースの代わりに margin-right で間隔を確保
 
@@ -223,9 +240,6 @@ if (idHeader) {
         fetchWikiInfo(productID);
         console.log("🎯 品番の取得に成功:", productID);
       }
-      
-      // ここでWiki取得処理へ（前のコードへ続く）
-      fetchWikiInfo(productID); 
     } else {
       console.error("❌ 品番の見出しは見つかりましたが、値(td)が見つかりません。");
     }
@@ -266,38 +280,50 @@ const observeUrlChange = () => {
   observer.observe(document.body, { childList: true, subtree: true });
 };
 
-// リンクをアフィリエイト用に書き換える関数
+// 商品リンクをアフィリエイト用に書き換える関数
+// （一覧・ランキング・トップなど video.dmm.co.jp の全ページが対象）
 function convertToAffiliateLinks() {
-    // URLに "/list/" が含まれている場合のみ実行
-    if (!location.href.includes("/list/")) return;
-
-    const myAffId = "6dy-990"; // あなたのID
-    
     const links = document.querySelectorAll('a[data-e2eid="title"], a[href*="/av/content/"]');
 
     links.forEach(link => {
-        let targetUrl = link.href;
-
-        // 1. すでにアフィリエイト化されている、または対象外ならスキップ
-        if (targetUrl.includes("al.fanza.co.jp") || !targetUrl.includes("/av/content/")) return;
-
-        // 2. 余計な計測パラメータ（_gl, _ga, _fplc等）を削除
-        // URLの末尾にある "&_gl=" 以降、または他のトラッキング用パラメータをカットします
-        targetUrl = targetUrl.split('&_gl=')[0]
-                             .split('&_ga=')[0]
-                             .split('&_fplc=')[0];
-
-        // 3. 品番(id=...)が含まれているか確認して変換
-        if (targetUrl.includes("id=")) {
-            const encodedUrl = encodeURIComponent(targetUrl);
-            const affiliateUrl = `https://al.fanza.co.jp/?lurl=${encodedUrl}&af_id=${myAffId}&ch=api`;
-
+        const affiliateUrl = toAffiliateUrl(link.href);
+        if (affiliateUrl) {
             link.href = affiliateUrl;
         }
     });
 
     const convertedCount = Array.from(links).filter(l => l.href.includes("al.fanza.co.jp")).length;
     console.log(`✅ ${convertedCount} 個のリンクを整形・変換しました。`);
+}
+
+// サイト(Next.js)は商品リンクのクリックをJSで横取りして内部ルーティングで遷移するため、
+// 書き換えた href が無視される。captureフェーズで React より先にクリックを捕まえて
+// preventDefault + stopImmediatePropagation し、アフィリエイトURLへの通常遷移を強制する。
+function interceptProductLinkClicks() {
+    document.addEventListener("click", (e) => {
+        // 修飾キー付きクリックはブラウザ標準動作に任せる
+        // （新規タブ等では書き換え済みの href がそのまま使われるため対応不要）
+        if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        if (!(e.target instanceof Element)) return;
+
+        const link = e.target.closest('a[href*="al.fanza.co.jp"], a[href*="/av/content/"]');
+        if (!link || link.target === "_blank") return;
+
+        let affiliateUrl;
+        if (link.href.includes("al.fanza.co.jp")) {
+            // 変換済みリンク（商品リンク・自前の女優名リンク）
+            affiliateUrl = link.href;
+        } else {
+            // Reactの再描画で href が元に戻っている等、未変換のままクリックされた場合は
+            // この場で変換する
+            affiliateUrl = toAffiliateUrl(link.href);
+        }
+        if (!affiliateUrl) return;
+
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        window.location.href = affiliateUrl;
+    }, true);
 }
 
 
@@ -311,6 +337,8 @@ if (document.readyState === "loading") {
 }
 
 function init() {
+    // 商品リンクのクリックを React より先に捕まえる（capture フェーズ）
+    interceptProductLinkClicks();
     // 初回実行
     runLogic();
     // URLと要素の追加を継続監視
@@ -323,10 +351,8 @@ function runLogic() {
     if (url.includes("video.dmm.co.jp")) {
         main(); // 女優名補完
     }
-    // リストページの場合
-    if (url.includes("/list/")) {
-        convertToAffiliateLinks(); // アフィリエイト化
-    }
+    // 商品リンクのアフィリエイト化（ランキング・トップ・一覧など全ページ）
+    convertToAffiliateLinks();
 }
 
 function observeFullPage() {
@@ -340,10 +366,8 @@ function observeFullPage() {
             runLogic();
         } 
         
-        // リストページの場合は、新しい商品が追加されたか常に監視
-        if (location.href.includes("/list/")) {
-            convertToAffiliateLinks(); 
-        }
+        // 新しい商品リンクが追加されていないか常に監視（全ページ対象）
+        convertToAffiliateLinks();
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
