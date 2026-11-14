@@ -2,7 +2,7 @@
 // @name         DMM Cast Auto-Filler
 // @name:en      DMM Cast Auto-Filler
 // @namespace    https://github.com/hxbdy/actress-ext
-// @version      2.1.1
+// @version      2.2.0
 // @description  素人女優の名前を表示します
 // @description:en A feature to add cast members to pages for works with unknown cast members
 // @author       hxbdy
@@ -46,6 +46,12 @@
     const CARD_SELECTOR = '[data-e2eid="content-card"], li';
     const CARD_WALK_LIMIT = 8;
     const CAST_LABEL_CLASS = "my-cast-label";
+
+    // 一覧ページの絞り込み（ベスト盤を隠す）
+    const BEST_FILTER_KEY = "fanza-cast-filler-hide-best";
+    const BEST_FILTER_PANEL_ID = "my-best-filter-panel";
+    const BEST_HIDDEN_CLASS = "my-best-hidden";
+    const BEST_TITLE_RE = /BEST|ＢＥＳＴ|ベスト/i;
 
     // ユーザースクリプトマネージャによって公開名が違うため吸収する
     const gmRequest =
@@ -333,6 +339,67 @@
             }
             @keyframes spin {
               to { transform: rotate(360deg); }
+            }
+            .${BEST_HIDDEN_CLASS} {
+                display: none !important;
+            }
+            #${BEST_FILTER_PANEL_ID} .my-best-toggle {
+                display: inline-flex;
+                align-items: center;
+                gap: 6px;
+                height: 22px;
+                padding: 0 8px 0 6px;
+                border: 1px solid #bbb;
+                border-radius: 11px;
+                background: #fff;
+                color: #555;
+                font-weight: bold;
+                cursor: pointer;
+                user-select: none;
+                white-space: nowrap;
+            }
+            #${BEST_FILTER_PANEL_ID} .my-best-switch {
+                position: relative;
+                width: 28px;
+                height: 16px;
+                border-radius: 8px;
+                background: #ccc;
+                transition: background 0.15s;
+                flex-shrink: 0;
+            }
+            #${BEST_FILTER_PANEL_ID} .my-best-switch::after {
+                content: "";
+                position: absolute;
+                top: 2px;
+                left: 2px;
+                width: 12px;
+                height: 12px;
+                border-radius: 50%;
+                background: #fff;
+                box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+                transition: transform 0.15s;
+            }
+            #${BEST_FILTER_PANEL_ID} .my-best-state {
+                min-width: 2.2em;
+                color: #888;
+            }
+            #${BEST_FILTER_PANEL_ID} .my-best-toggle[aria-pressed="true"] {
+                border-color: #c00;
+                background: #fff0f0;
+                color: #c00;
+            }
+            #${BEST_FILTER_PANEL_ID} .my-best-toggle[aria-pressed="true"] .my-best-switch {
+                background: #c00;
+            }
+            #${BEST_FILTER_PANEL_ID} .my-best-toggle[aria-pressed="true"] .my-best-switch::after {
+                transform: translateX(12px);
+            }
+            #${BEST_FILTER_PANEL_ID} .my-best-toggle[aria-pressed="true"] .my-best-state {
+                color: #c00;
+            }
+            #${BEST_FILTER_PANEL_ID} .my-best-count {
+                margin-left: 6px;
+                color: #666;
             }
         `;
         document.head.appendChild(style);
@@ -661,6 +728,142 @@
     }
 
     // ---------------------------------------------------------
+    // 一覧ページ：ベスト盤を除外する絞り込み
+    // ---------------------------------------------------------
+
+    // /list/ だけでなく /av/list/ や /amateur/list/ のようなフロア別の一覧も対象にする
+    function isListPage() {
+        return /(^|\/)list(\/|$)/.test(location.pathname);
+    }
+
+    function loadHideBest() {
+        try {
+            return localStorage.getItem(BEST_FILTER_KEY) === "1";
+        } catch (e) {
+            return false;
+        }
+    }
+
+    function saveHideBest(on) {
+        try {
+            localStorage.setItem(BEST_FILTER_KEY, on ? "1" : "0");
+        } catch (e) {
+            warn("⚠️ 絞り込み設定の保存に失敗しました");
+        }
+    }
+
+    // カードの商品名を集める。自前の女優名ラベルは含めない
+    function cardTitleText(card) {
+        const parts = [];
+        card.querySelectorAll(CARD_LINK_SELECTOR).forEach(a => {
+            if (a.closest("." + CAST_LABEL_CLASS)) return;
+            parts.push(a.textContent);
+            a.querySelectorAll("img[alt]").forEach(img => parts.push(img.alt));
+        });
+        return parts.join(" ");
+    }
+
+    // 一覧ページ以外では全カードを表示に戻す
+    function applyBestFilter() {
+        const enabled = isListPage() && loadHideBest();
+        const seen = new Set();
+        let hiddenCount = 0;
+
+        document.querySelectorAll(CARD_LINK_SELECTOR).forEach(link => {
+            const cid = cidFromHref(link.getAttribute("href"));
+            if (!cid) return;
+            const card = cardRootOf(link, cid);
+            if (!card || seen.has(card)) return;
+            seen.add(card);
+
+            // 一覧は <ul class="grid"><li><div data-e2eid="content-card"> の構造なので、
+            // カード本体だけ隠すと li の枠が空いたまま残る。グリッドの1マスである li ごと隠して前に詰める
+            const parent = card.parentElement;
+            const cell = parent && parent.tagName === "LI" ? parent : card;
+            seen.add(cell);
+
+            const hide = enabled && BEST_TITLE_RE.test(cardTitleText(card));
+            cell.classList.toggle(BEST_HIDDEN_CLASS, hide);
+            if (hide) hiddenCount++;
+        });
+
+        // 対象外になったカード（ページ遷移後に残った要素など）も戻す
+        document.querySelectorAll("." + BEST_HIDDEN_CLASS).forEach(el => {
+            if (!seen.has(el)) el.classList.remove(BEST_HIDDEN_CLASS);
+        });
+
+        renderBestFilterState(enabled, hiddenCount);
+    }
+
+    // スイッチの見た目（ON/OFF と非表示にした件数）を更新する
+    function renderBestFilterState(enabled, hiddenCount) {
+        const panel = document.getElementById(BEST_FILTER_PANEL_ID);
+        if (!panel) return;
+        const toggle = panel.querySelector(".my-best-toggle");
+        const state = panel.querySelector(".my-best-state");
+        const count = panel.querySelector(".my-best-count");
+        toggle.setAttribute("aria-pressed", enabled ? "true" : "false");
+        toggle.title = enabled
+            ? "クリックするとBEST・ベストの商品も表示します"
+            : "クリックすると商品名にBEST・ベストを含む商品を隠します";
+        state.textContent = enabled ? "ON" : "OFF";
+        count.textContent = enabled ? `${hiddenCount}件を非表示中` : "";
+    }
+
+    // 一覧ページにだけ、「並び替え」のセレクトボックスの右隣にチェックボックスを出す。
+    //   <div class="flex gap-3">
+    //     <div class="text-xs flex flex-wrap items-center">並び替え <select id="sort">…</select></div>
+    //     ← ここに追加
+    //   </div>
+    function ensureBestFilterPanel() {
+        const existing = document.getElementById(BEST_FILTER_PANEL_ID);
+        const sortSelect = isListPage() ? document.querySelector('select#sort') : null;
+        const sortBox = sortSelect ? sortSelect.parentElement : null;
+
+        if (!sortBox) {
+            if (existing) existing.remove();
+            return;
+        }
+        // Reactの再描画で並び替え欄が作り直された場合は付け直す
+        if (existing && existing.previousElementSibling === sortBox) return;
+        if (existing) existing.remove();
+
+        const panel = document.createElement("div");
+        panel.id = BEST_FILTER_PANEL_ID;
+        panel.className = "text-xs flex items-center shrink-0";
+        panel.innerHTML =
+            `<button type="button" class="my-best-toggle" aria-pressed="false">`
+          +   `<span class="my-best-switch"></span>`
+          +   `<span>BEST・ベスト除外</span>`
+          +   `<span class="my-best-state">OFF</span>`
+          + `</button>`
+          + `<span class="my-best-count"></span>`;
+        panel.querySelector(".my-best-toggle").addEventListener("click", () => {
+            saveHideBest(!loadHideBest());
+            applyBestFilter();
+        });
+        sortBox.insertAdjacentElement("afterend", panel);
+        // 2D/VR・配信形式・価格などのプルダウンが並ぶと横幅が足りなくなるため、
+        // 並び替え欄の行を折り返せるようにしてスイッチがはみ出さないようにする
+        if (panel.parentElement) {
+            panel.parentElement.style.flexWrap = "wrap";
+            panel.parentElement.style.rowGap = "4px";
+        }
+        renderBestFilterState(loadHideBest(), 0);
+    }
+
+    function updateBestFilter() {
+        ensureBestFilterPanel();
+        applyBestFilter();
+    }
+
+    let bestFilterTimer = null;
+    function scheduleBestFilter() {
+        clearTimeout(bestFilterTimer);
+        bestFilterTimer = setTimeout(updateBestFilter, 100);
+    }
+
+    // ---------------------------------------------------------
     // ページ全体の処理
     // ---------------------------------------------------------
 
@@ -719,6 +922,8 @@
         convertToAffiliateLinks();
         // 一覧カードへの女優名表示
         scheduleCastFill();
+        // 一覧ページのベスト盤除外
+        scheduleBestFilter();
     }
 
     function observeFullPage() {
@@ -739,6 +944,7 @@
             // 新しい商品リンクが追加されていないか常に監視（全ページ対象）
             convertToAffiliateLinks();
             scheduleCastFill();
+            scheduleBestFilter();
         });
 
         observer.observe(document.body, { childList: true, subtree: true });
