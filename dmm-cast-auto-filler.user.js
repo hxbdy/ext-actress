@@ -2,8 +2,8 @@
 // @name         DMM Cast Auto-Filler
 // @name:en      DMM Cast Auto-Filler
 // @namespace    https://github.com/hxbdy/actress-ext
-// @version      2.3.0
-// @description  素人女優の名前を表示します
+// @version      2.3.1
+// @description  素人女優の名前と出演作を表示します
 // @description:en A feature to add cast members to pages for works with unknown cast members
 // @author       hxbdy
 // @icon         https://raw.githubusercontent.com/hxbdy/actress-ext/main/icon.png
