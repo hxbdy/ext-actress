@@ -2,7 +2,7 @@
 // @name         DMM Cast Auto-Filler
 // @name:en      DMM Cast Auto-Filler
 // @namespace    https://github.com/hxbdy/actress-ext
-// @version      2.2.0
+// @version      2.3.0
 // @description  素人女優の名前を表示します
 // @description:en A feature to add cast members to pages for works with unknown cast members
 // @author       hxbdy
@@ -52,6 +52,16 @@
     const BEST_FILTER_PANEL_ID = "my-best-filter-panel";
     const BEST_HIDDEN_CLASS = "my-best-hidden";
     const BEST_TITLE_RE = /BEST|ＢＥＳＴ|ベスト/i;
+
+    // 作品ページの出演者名の下に並べる、他の出演作（素人作品）のサムネイル
+    const WORKS_SHOW_MAX = 12;
+    const WORK_THUMB_SIZE = 90;
+    const WORKS_SECTION_CLASS = "my-works-section";
+
+    // 女優は av-wiki の WordPress タグとして登録されている（https://av-wiki.net/av-actress/<タグslug>/）
+    const WIKI_TAGS_API = "https://av-wiki.net/wp-json/wp/v2/tags";
+    const TAG_RE = /^[%0-9a-z_-]{1,200}$/i;
+    const AMATEUR_MARK = "av-wiki.net/fanza-shirouto/";
 
     // ユーザースクリプトマネージャによって公開名が違うため吸収する
     const gmRequest =
@@ -123,8 +133,19 @@
         return out.filter((s, i) => out.indexOf(s) === i);
     }
 
-    // 記事HTMLから「AV女優名」を取り出して配列で返す
-    function extractActressNames(html) {
+    // 女優名の区切り（半角・全角スペース、カンマ、読点）
+    const NAME_SEPARATOR_RE = /[\s,、　 ]+/;
+
+    // 女優リンク https://av-wiki.net/av-actress/<タグslug>/ からタグslugを取り出す。
+    // slug は URL エンコードされたまま扱う（REST API の tags?slug= にもその形で渡す）
+    function actressTagFromHref(href) {
+        const m = /\/av-actress\/([^/?#]+)\/?/.exec(href || "");
+        return m ? m[1].toLowerCase() : null;
+    }
+
+    // 記事HTMLから「AV女優名」を取り出して [{ name, tag }] で返す。
+    // tag は av-wiki の女優タグslug（他の出演作を引くのに使う）。直書きの名前は null
+    function extractActresses(html) {
         const doc = new DOMParser().parseFromString(html, "text/html");
 
         // 全ての <dt> 要素（ラベル部分）から「AV女優名」の項目を探す
@@ -148,16 +169,34 @@
         // 「＊＊＊」などの伏せ字は名前として扱わない
         if (!raw || raw.includes("＊＊＊")) return [];
 
-        // 半角スペース、全角スペース、カンマ（全角・半角）、読点をすべて対象に分割
-        return raw.split(/[\s,、　 ]+/).filter(n => n.length > 0);
+        if (anchorTags.length === 0) {
+            return raw.split(NAME_SEPARATOR_RE).filter(n => n.length > 0).map(name => ({ name, tag: null }));
+        }
+
+        const out = [];
+        anchorTags.forEach(a => {
+            const names = a.textContent.trim().split(NAME_SEPARATOR_RE).filter(n => n.length > 0);
+            // 1つのリンクに複数名が入っている場合は、どの名前のタグか判別できないので付けない
+            const tag = names.length === 1 ? actressTagFromHref(a.getAttribute("href")) : null;
+            names.forEach(name => out.push({ name, tag }));
+        });
+        return out;
+    }
+
+    function namesOf(actresses) {
+        return actresses.map(a => a.name);
     }
 
     function fetchWikiChunk(slugs) {
+        const url = `${WIKI_API}?slug=${slugs.map(encodeURIComponent).join(",")}`
+                  + `&per_page=${WIKI_CHUNK}&_fields=slug,content`;
+        return gmGetJson(url).then(posts => (Array.isArray(posts) ? posts : []));
+    }
+
+    // av-wiki の REST API から JSON を取得する
+    function gmGetJson(url) {
         return new Promise((resolve, reject) => {
             if (!gmRequest) return reject(new Error("GM_xmlhttpRequest が利用できません"));
-
-            const url = `${WIKI_API}?slug=${slugs.map(encodeURIComponent).join(",")}`
-                      + `&per_page=${WIKI_CHUNK}&_fields=slug,content`;
 
             gmRequest({
                 method: "GET",
@@ -178,7 +217,7 @@
         });
     }
 
-    // slug の配列を渡すと slug -> 女優名配列 の Map を返す
+    // slug の配列を渡すと slug -> [{ name, tag }] の Map を返す
     async function fetchWikiBySlugs(slugs) {
         const found = new Map();
         for (let i = 0; i < slugs.length; i += WIKI_CHUNK) {
@@ -186,14 +225,14 @@
             posts.forEach(post => {
                 const html = post && post.content && post.content.rendered;
                 if (post && post.slug && html) {
-                    found.set(post.slug, extractActressNames(html));
+                    found.set(post.slug, extractActresses(html));
                 }
             });
         }
         return found;
     }
 
-    // cid の配列を渡すと cid -> 女優名配列 の Map を返す。
+    // cid の配列を渡すと cid -> [{ name, tag }] の Map を返す。
     // 1段目でハイフン形をまとめて引き、取れなかったものだけ2段目の候補に回す。
     async function resolveCastByCids(cids) {
         const result = new Map();
@@ -252,18 +291,26 @@
         return cache;
     }
 
-    // 見つかった名前の配列 / 未登録なら空配列 / キャッシュ無しは null
+    // 見つかった出演者 [{ name, tag }] / 未登録なら空配列 / キャッシュ無しは null。
+    // n: 名前の配列、g: 名前と同じ並びのタグslug
     function cacheGet(cid) {
         const entry = loadCache()[cid];
         if (!entry || !entry.t) return null;
         const names = entry.n || [];
         const ttl = names.length ? TTL_HIT : TTL_MISS;
         if (Date.now() - entry.t > ttl) return null;
-        return names;
+        // タグを持たない古い形式のキャッシュは、出演作を出せるよう一度だけ取り直す
+        if (names.length && !Array.isArray(entry.g)) return null;
+        const tags = entry.g || [];
+        return names.map((name, i) => ({ name, tag: tags[i] || null }));
     }
 
-    function cacheSet(cid, names) {
-        loadCache()[cid] = { n: names, t: Date.now() };
+    function cacheSet(cid, actresses) {
+        loadCache()[cid] = {
+            n: namesOf(actresses),
+            g: actresses.map(a => a.tag || null),
+            t: Date.now()
+        };
     }
 
     function saveCache() {
@@ -279,6 +326,110 @@
         } catch (e) {
             warn("⚠️ キャッシュの保存に失敗しました");
         }
+    }
+
+    // ---------------------------------------------------------
+    // 出演者ごとの他の出演作（素人作品）
+    // ---------------------------------------------------------
+
+    const WORKS_KEY = "fanza-cast-filler-works";
+    const WORKS_MAX = 200;
+    const WORKS_TTL = 3 * 24 * 60 * 60 * 1000;
+
+    // tag -> { w: [{ cid, title }], t }
+    let worksCache = null;
+
+    function loadWorksCache() {
+        if (worksCache) return worksCache;
+        try {
+            worksCache = JSON.parse(localStorage.getItem(WORKS_KEY)) || {};
+        } catch (e) {
+            worksCache = {};
+        }
+        return worksCache;
+    }
+
+    function worksCacheGet(tag) {
+        const entry = loadWorksCache()[tag];
+        if (!entry || !entry.t || Date.now() - entry.t > WORKS_TTL) return null;
+        return entry.w || [];
+    }
+
+    function worksCacheSet(tag, works) {
+        const wc = loadWorksCache();
+        wc[tag] = { w: works, t: Date.now() };
+        const keys = Object.keys(wc);
+        if (keys.length > WORKS_MAX) {
+            keys.sort((a, b) => wc[a].t - wc[b].t)
+                .slice(0, keys.length - WORKS_MAX)
+                .forEach(k => delete wc[k]);
+        }
+        try {
+            localStorage.setItem(WORKS_KEY, JSON.stringify(wc));
+        } catch (e) {
+            warn("⚠️ 出演作キャッシュの保存に失敗しました");
+        }
+    }
+
+    function stripTags(html) {
+        return html
+            .replace(/<[^>]*>/g, "")
+            .replace(/&(amp|lt|gt|quot|#0?39|#8211|#8212|nbsp);/g, (m, e) =>
+                ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'", "#039": "'", "#8211": "–", "#8212": "—", nbsp: " " }[e]))
+            .replace(/\s+/g, " ")
+            .trim();
+    }
+
+    // 記事本文の <dt>見出し</dt><dd>値</dd> から値を取り出す
+    function dlValue(html, label) {
+        const re = new RegExp(`<dt>\\s*${label}\\s*</dt>\\s*<dd>([\\s\\S]*?)</dd>`);
+        const m = re.exec(html);
+        return m ? stripTags(m[1]) : "";
+    }
+
+    // 素人作品の記事なら { cid, title } を返す（それ以外は null）
+    function workFromPost(post) {
+        const html = post && post.content && post.content.rendered;
+        if (typeof html !== "string" || !html.includes(AMATEUR_MARK)) return null;
+
+        const cid = dlValue(html, "FANZA品番").toLowerCase();
+        if (!/^[0-9a-z_]{1,40}$/.test(cid)) return null;
+
+        // 作品タイトル欄が無い記事は、冒頭の引用（【品番】タイトル）を使う
+        let title = dlValue(html, "作品タイトル");
+        if (!title) {
+            const first = /<p>([\s\S]*?)<\/p>/.exec(html);
+            title = first ? stripTags(first[1]).replace(/^【[^】]*】\s*/, "") : "";
+        }
+        return { cid, title: title.slice(0, 200) };
+    }
+
+    // 女優タグslugから、その女優の素人作品 [{ cid, title }] を返す（新しい順）。
+    // タグslug -> タグID -> そのタグの記事一覧、の順に引く
+    async function fetchActressWorks(tag) {
+        const cached = worksCacheGet(tag);
+        if (cached) return cached;
+        if (typeof tag !== "string" || !TAG_RE.test(tag)) return [];
+
+        // tag は URL エンコード済みの slug なので、そのまま埋め込む
+        const tags = await gmGetJson(`${WIKI_TAGS_API}?slug=${tag}&_fields=id`);
+        const id = Array.isArray(tags) && tags[0] && tags[0].id;
+
+        const works = [];
+        if (Number.isInteger(id)) {
+            const posts = await gmGetJson(`${WIKI_API}?tags=${id}&per_page=${WIKI_CHUNK}&_fields=slug,content`);
+            const seen = new Set();
+            (Array.isArray(posts) ? posts : []).forEach(p => {
+                const w = workFromPost(p);
+                if (w && !seen.has(w.cid)) {
+                    seen.add(w.cid);
+                    works.push(w);
+                }
+            });
+        }
+
+        worksCacheSet(tag, works);
+        return works;
     }
 
     // ---------------------------------------------------------
@@ -401,6 +552,34 @@
                 margin-left: 6px;
                 color: #666;
             }
+            .my-cast-block + .my-cast-block {
+                margin-top: 8px;
+            }
+            .my-works-grid {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+                margin-top: 4px;
+            }
+            .my-works-grid:empty {
+                display: none;
+            }
+            .my-works-grid a {
+                display: block;
+                width: ${WORK_THUMB_SIZE}px;
+                line-height: 0;
+            }
+            .my-works-grid img {
+                width: ${WORK_THUMB_SIZE}px;
+                height: ${WORK_THUMB_SIZE}px;
+                aspect-ratio: 1 / 1;
+                object-fit: cover;
+                border: 1px solid #ddd;
+                background: #f3f3f3;
+            }
+            .my-works-grid a:hover img {
+                border-color: #ff0000;
+            }
         `;
         document.head.appendChild(style);
     }
@@ -443,10 +622,86 @@
         loadingPrevHtml = "";
     }
 
-    // DMMの出演者欄に書き込む関数
-    function fillActressToDMM(names) {
+    // 素人作品のサムネイル（300×300 の正方形）と作品ページURL（アフィリエイト経由）
+    function amateurThumbUrl(cid) {
+        return `https://pics.dmm.co.jp/digital/amateur/${cid}/${cid}jp.jpg`;
+    }
+
+    function amateurContentUrl(cid) {
+        const url = `https://video.dmm.co.jp/amateur/content/?id=${encodeURIComponent(cid)}`;
+        return `https://al.fanza.co.jp/?lurl=${encodeURIComponent(url)}&af_id=${MY_AFF_ID}&ch=api`;
+    }
+
+    // 出演者名の下に、その出演者の他の素人作品を正方形サムネで並べる
+    async function renderActressWorks(grid, tag, currentCid) {
+        try {
+            const works = (await fetchActressWorks(tag))
+                .filter(w => w.cid && w.cid !== currentCid)
+                .slice(0, WORKS_SHOW_MAX);
+            if (!grid.isConnected) return;
+
+            grid.innerHTML = works.map(w => {
+                const title = escapeHtml(w.title || w.cid);
+                return `<a href="${amateurContentUrl(w.cid)}" title="${title}">`
+                     + `<img src="${amateurThumbUrl(w.cid)}" alt="${title}" loading="lazy"`
+                     + ` width="${WORK_THUMB_SIZE}" height="${WORK_THUMB_SIZE}"></a>`;
+            }).join("");
+            // 画像が無い作品は枠ごと消す
+            grid.querySelectorAll("img").forEach(img => {
+                img.addEventListener("error", () => img.parentElement && img.parentElement.remove(), { once: true });
+            });
+        } catch (e) {
+            err("❌ " + e.message);
+            grid.innerHTML = "";
+        }
+    }
+
+    // 出演者ごとに「名前」、その下に「他の出演作の正方形サムネ」を並べるHTML
+    function castBlocksHtml(actresses) {
+        return actresses.map(a =>
+            `<div class="my-cast-block">${castLinksHtml([a.name])}`
+          + (a.tag ? `<div class="my-works-grid"><span class="loading-spinner"></span></div>` : "")
+          + `</div>`
+        ).join("");
+    }
+
+    // castBlocksHtml で作った枠にサムネを読み込む
+    function startWorksRendering(root, actresses, currentCid) {
+        const grids = root.querySelectorAll(".my-works-grid");
+        actresses.filter(a => a.tag).forEach((a, i) => {
+            if (grids[i]) renderActressWorks(grids[i], a.tag, currentCid);
+        });
+    }
+
+    // DMM 側で出演者が既に埋まっている場合。
+    // 元の出演者名と自前の出演者名が二重に並ばないよう、av-wiki で出演作を引ける出演者がいれば
+    // セルの中身を自前の表示（名前＋その下に素人作品）に置き換える。引けなければ元の表示のまま
+    function replaceFilledCell(cell, actresses, currentCid) {
+        if (!actresses || !actresses.some(a => a.tag) || !cell.isConnected) return;
+        if (cell.querySelector("." + WORKS_SECTION_CLASS)) return;
+
+        ensureStyle();
+        const section = document.createElement("div");
+        section.className = WORKS_SECTION_CLASS;
+        section.innerHTML = castBlocksHtml(actresses);
+        cell.replaceChildren(section);
+        startWorksRendering(section, actresses, currentCid);
+    }
+
+    // 出演者欄に DMM 側の名前が既に入っていればそのセルを返す（無ければ null）
+    function filledCastCell() {
+        const { cell, created } = findOrCreateCastCell();
+        if (!cell || created) return null;
+        const currentText = cell.innerText.trim();
+        // ハイフン以外かつ＊＊＊以外が入っていれば、名前が登録済み
+        if (currentText !== "" && currentText !== "----" && !currentText.includes("＊＊＊")) return cell;
+        return null;
+    }
+
+    // DMMの出演者欄に書き込む関数（actresses: [{ name, tag }]）
+    function fillActressToDMM(actresses, currentCid) {
         // 名前が取れなかった場合は何もしない
-        if (!names || !names.length) {
+        if (!actresses || !actresses.length) {
             log("⚠️ 有効な女優名ではないため、上書きをスキップします。");
             clearLoading();
             return;
@@ -454,15 +709,14 @@
 
         ensureStyle();
 
-        const linkHtml = castLinksHtml(names);
-
         // 「取得中...」を出したセルが生きていればそこへ、Reactの再描画等で失われていれば探し直す
         const targetCell = (loadingCell && loadingCell.isConnected)
             ? loadingCell
             : findOrCreateCastCell().cell;
 
         if (targetCell) {
-            targetCell.innerHTML = linkHtml;
+            targetCell.innerHTML = castBlocksHtml(actresses);
+            startWorksRendering(targetCell, actresses, currentCid);
         }
 
         // 書き込みに成功したので行は残す
@@ -474,16 +728,6 @@
     function showLoading() {
         const { cell, created, row } = findOrCreateCastCell();
         if (!cell) return false;
-
-        if (!created) {
-            // --- ここが重要：既存の文字をチェック ---
-            const currentText = cell.innerText.trim();
-            // すでに名前（ハイフン以外かつ＊＊＊以外）が入っているなら、何もしない
-            if (currentText !== "" && currentText !== "----" && !currentText.includes("＊＊＊")) {
-                log("✅ すでに名前が登録されているため、上書きしません。");
-                return false; // 取得不要であることを伝える
-            }
-        }
 
         ensureStyle();
         loadingPrevHtml = created ? "" : cell.innerHTML;
@@ -503,40 +747,38 @@
         return td ? td.innerText.trim() : "";
     }
 
-    // 詳細ページ用の問い合わせ。メーカー品番を優先し、配信品番(cid)も候補にする
-    async function fetchCastForDetail(makerId, deliveryId) {
+    // 詳細ページ用の出演者の取得。キャッシュを優先し、無ければ av-wiki に問い合わせる。
+    // メーカー品番を優先し、配信品番(cid)も候補にする。[{ name, tag }] を返す（見つからなければ空配列）
+    async function lookupCastForDetail(makerId, deliveryId) {
+        const cid = (deliveryId || "").toLowerCase();
+
+        // 一覧ページで既に引いていればそれを使う
+        const cached = cid ? cacheGet(cid) : null;
+        if (cached) {
+            log("💾 キャッシュから復元:", namesOf(cached).join(" "));
+            return cached;
+        }
+
         const slugs = [];
         if (makerId) slugs.push(makerId.toLowerCase());
-        if (deliveryId) cidToSlugCandidates(deliveryId.toLowerCase()).forEach(s => slugs.push(s));
+        if (cid) cidToSlugCandidates(cid).forEach(s => slugs.push(s));
         const candidates = slugs.filter((s, i) => slugs.indexOf(s) === i);
 
-        try {
-            const found = await fetchWikiBySlugs(candidates);
-            let names = [];
-            for (const slug of candidates) {
-                const hit = found.get(slug);
-                if (hit && hit.length) {
-                    names = hit;
-                    break;
-                }
+        const found = await fetchWikiBySlugs(candidates);
+        let actresses = [];
+        for (const slug of candidates) {
+            const hit = found.get(slug);
+            if (hit && hit.length) {
+                actresses = hit;
+                break;
             }
-
-            if (deliveryId) {
-                cacheSet(deliveryId.toLowerCase(), names);
-                saveCache();
-            }
-
-            if (names.length) {
-                log("🎯 女優名を発見:", names.join(" "));
-                fillActressToDMM(names);
-            } else {
-                warn("⚠️ av-wiki に該当する記事が見つかりませんでした。");
-                clearLoading();
-            }
-        } catch (e) {
-            err("❌ " + e.message);
-            clearLoading();
         }
+
+        if (cid) {
+            cacheSet(cid, actresses);
+            saveCache();
+        }
+        return actresses;
     }
 
     // メインロジック（詳細ページの女優名補完）
@@ -559,18 +801,35 @@
                 return;
             }
 
-            if (!showLoading()) return;
+            const currentCid = (deliveryId || "").toLowerCase();
+            log("🎯 品番の取得に成功:", makerId || deliveryId);
 
-            // 一覧ページで既に引いていればそれを使う
-            const cached = deliveryId ? cacheGet(deliveryId.toLowerCase()) : null;
-            if (cached) {
-                log("💾 キャッシュから復元:", cached.join(" "));
-                fillActressToDMM(cached);
+            // DMM 側で出演者が埋まっているページも、av-wiki の出演者名＋素人作品の表示に置き換える
+            const filled = filledCastCell();
+            if (filled) {
+                log("✅ すでに名前が登録されているため、出演作付きの表示に置き換えます。");
+                const actresses = await lookupCastForDetail(makerId, deliveryId);
+                // 問い合わせ中に React の再描画でセルが作り直されていたら探し直す
+                const cell = filled.isConnected ? filled : filledCastCell();
+                if (cell) replaceFilledCell(cell, actresses, currentCid);
                 return;
             }
 
-            log("🎯 品番の取得に成功:", makerId || deliveryId);
-            fetchCastForDetail(makerId, deliveryId);
+            if (!showLoading()) return;
+
+            try {
+                const actresses = await lookupCastForDetail(makerId, deliveryId);
+                if (actresses.length) {
+                    log("🎯 女優名を発見:", namesOf(actresses).join(" "));
+                    fillActressToDMM(actresses, currentCid);
+                } else {
+                    warn("⚠️ av-wiki に該当する記事が見つかりませんでした。");
+                    clearLoading();
+                }
+            } catch (e) {
+                err("❌ " + e.message);
+                clearLoading();
+            }
         } catch (error) {
             err(error.message);
         }
@@ -669,7 +928,8 @@
         return node;
     }
 
-    function applyCast(card, anchor, names) {
+    function applyCast(card, anchor, actresses) {
+        const names = namesOf(actresses);
         card.dataset.castChecked = "1";
         if (!names.length) return;
         if (!anchor.isConnected || card.querySelector("." + CAST_LABEL_CLASS)) return;
